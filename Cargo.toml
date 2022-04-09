@@ -1,0 +1,40 @@
+[package]
+name = "ark-sapling-mpc-verify"
+version = "0.1.0"
+edition = "2021"
+authors = ["Brandon H. Gomes <bhgomes@pm.me>"]
+readme = "README.md"
+license-file = "LICENSE"
+repository = "https://github.com/bhgomes/ark-sapling-mpc-verify"
+homepage = "https://github.com/bhgomes/ark-sapling-mpc-verify"
+documentation = "https://github.com/bhgomes/ark-sapling-mpc-verify"
+categories = [""]
+keywords = [""]
+description = "Verify the Sapling MPC using Arkworks"
+publish = false
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg doc_cfg" cargo +nightly doc --all-features --open
+all-features = true
+rustdoc-args = ["--cfg", "doc_cfg"]
+
+[badges]
+is-it-maintained-issue-resolution = { repository = "bhgomes/ark-sapling-mpc-verify" }
+is-it-maintained-open-issues = { repository = "bhgomes/ark-sapling-mpc-verify" }
+maintenance = { status = "actively-developed" }
+
+[features]
+# Enable Parallel Computation
+parallel = ["crossbeam", "rayon"]
+
+[dependencies]
+ark-bls12-381 = { version = "0.3.0", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.3.0", default-features = false }
+blake2 = { version = "0.10.4", default-features = false, features = ["std"] }
+byteorder = { version = "1.4.3", default-features = false, features = ["std"] }
+crossbeam = { version = "0.8.1", optional = true, default-features = false }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+rand = { version = "0.8.5", default-features = false }
+rand_chacha = { version = "0.3.1", default-features = false }
+rayon = { version = "1.5.1", optional = true, default-features = false }
