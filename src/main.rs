@@ -51,23 +51,23 @@ macro_rules! from_variant_impl {
     };
 }
 
-///
+/// Serialization Trait
 pub trait Serialize {
-    ///
+    /// Serializes `self` into `writer`.
     fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
     where
         W: Write;
 }
 
-///
+/// Compressed Serialization Trait
 pub trait SerializeCompressed {
-    ///
+    /// Serializes a compressed form of `self` into `writer`.
     fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
     where
         W: Write;
 }
 
-///
+/// Deserialization Trait
 pub trait Deserialize: Sized {
     ///
     type Error: From<io::Error>;
@@ -78,7 +78,7 @@ pub trait Deserialize: Sized {
         R: Read;
 }
 
-///
+/// Compressed Deserialization Trait
 pub trait DeserializeCompressed: Sized {
     ///
     type Error: From<io::Error>;
@@ -93,14 +93,6 @@ pub trait DeserializeCompressed: Sized {
 const HASHER_WRITER_EXPECT_MESSAGE: &str =
     "The `Blake2b` hasher's `Write` implementation never returns an error.";
 
-/*
-// This ceremony is based on the BLS12-381 elliptic curve construction.
-pub const G1_UNCOMPRESSED_BYTE_SIZE: usize = 96;
-pub const G2_UNCOMPRESSED_BYTE_SIZE: usize = 192;
-pub const G1_COMPRESSED_BYTE_SIZE: usize = 48;
-pub const G2_COMPRESSED_BYTE_SIZE: usize = 96;
-*/
-
 /// The accumulator supports circuits with 2^21 multiplication gates.
 pub const TAU_POWERS_LENGTH: usize = 1 << 21;
 
@@ -109,31 +101,6 @@ pub const TAU_POWERS_LENGTH: usize = 1 << 21;
 /// where the largest i = m - 2, requiring the computation of tau^(2m - 2)
 /// and thus giving us a vector length of 2^22 - 1.
 pub const TAU_POWERS_G1_LENGTH: usize = (TAU_POWERS_LENGTH << 1) - 1;
-
-/*
-/// The size of the accumulator on disk.
-pub const ACCUMULATOR_BYTE_SIZE: usize = (TAU_POWERS_G1_LENGTH * G1_UNCOMPRESSED_BYTE_SIZE) + // g1 tau powers
-                                         (TAU_POWERS_LENGTH * G2_UNCOMPRESSED_BYTE_SIZE) + // g2 tau powers
-                                         (TAU_POWERS_LENGTH * G1_UNCOMPRESSED_BYTE_SIZE) + // alpha tau powers
-                                         (TAU_POWERS_LENGTH * G1_UNCOMPRESSED_BYTE_SIZE) // beta tau powers
-                                         + G2_UNCOMPRESSED_BYTE_SIZE // beta in g2
-                                         + 64; // blake2b hash of previous contribution
-
-/// The "public key" is used to verify a contribution was correctly
-/// computed.
-pub const PUBLIC_KEY_SIZE: usize = 3 * G2_UNCOMPRESSED_BYTE_SIZE + // tau, alpha, and beta in g2
-                                   6 * G1_UNCOMPRESSED_BYTE_SIZE; // (s1, s1*tau), (s2, s2*alpha), (s3, s3*beta) in g1
-
-/// The size of the contribution on disk.
-pub const CONTRIBUTION_BYTE_SIZE: usize = (TAU_POWERS_G1_LENGTH * G1_COMPRESSED_BYTE_SIZE) + // g1 tau powers
-                                          (TAU_POWERS_LENGTH * G2_COMPRESSED_BYTE_SIZE) + // g2 tau powers
-                                          (TAU_POWERS_LENGTH * G1_COMPRESSED_BYTE_SIZE) + // alpha tau powers
-                                          (TAU_POWERS_LENGTH * G1_COMPRESSED_BYTE_SIZE) // beta tau powers
-                                          + G2_COMPRESSED_BYTE_SIZE // beta in g2
-                                          + 64 // blake2b hash of input accumulator
-                                          + PUBLIC_KEY_SIZE; // public key
-
-*/
 
 ///
 #[inline]
@@ -160,79 +127,38 @@ where
     todo!()
 }
 
-///
-pub struct Pair<E>
+/*
+fn write_point<W, G>(writer: &mut W, p: &G, compression: UseCompression) -> io::Result<()>
 where
-    E: PairingEngine,
+    W: Write,
+    G: CurveAffine,
 {
-    ///
-    pair: (E::G1Prepared, E::G2Prepared),
+    match compression {
+        UseCompression::Yes => writer.write_all(p.into_compressed().as_ref()),
+        UseCompression::No => writer.write_all(p.into_uncompressed().as_ref()),
+    }
 }
+*/
 
-impl<E> Pair<E>
+///
+#[inline]
+fn pairing<E>(pair: &(E::G1Prepared, E::G2Prepared)) -> E::Fqk
 where
     E: PairingEngine,
 {
-    ///
-    #[inline]
-    pub fn new<G1, G2>(lhs: G1, rhs: G2) -> Self
-    where
-        G1: Into<E::G1Prepared>,
-        G2: Into<E::G2Prepared>,
-    {
-        Self {
-            pair: (lhs.into(), rhs.into()),
-        }
-    }
-
-    ///
-    #[inline]
-    pub fn pairing(&self) -> E::Fqk {
-        E::product_of_pairings(iter::once(&self.pair))
-    }
+    E::product_of_pairings(iter::once(pair))
 }
 
 ///
 #[inline]
-pub fn pairing<E, G1, G2>(lhs: G1, rhs: G2) -> E::Fqk
-where
-    E: PairingEngine,
-    G1: Into<E::G1Prepared>,
-    G2: Into<E::G2Prepared>,
-{
-    Pair::<E>::new(lhs, rhs).pairing()
-}
-
-///
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Ratio<T> {
-    ///
-    pub numerator: T,
-
-    ///
-    pub denominator: T,
-}
-
-///
-pub type G1Ratio<E> = Ratio<<E as PairingEngine>::G1Affine>;
-
-///
-pub type G1PreparedRatio<E> = Ratio<<E as PairingEngine>::G1Prepared>;
-
-///
-pub type G2Ratio<E> = Ratio<<E as PairingEngine>::G2Affine>;
-
-///
-pub type G2PreparedRatio<E> = Ratio<<E as PairingEngine>::G2Prepared>;
-
-///
-#[inline]
-pub fn same_ratio<E>(lhs: G1PreparedRatio<E>, rhs: G2PreparedRatio<E>) -> bool
+fn same_pairing<E>(
+    lhs: &(E::G1Prepared, E::G2Prepared),
+    rhs: &(E::G1Prepared, E::G2Prepared),
+) -> bool
 where
     E: PairingEngine,
 {
-    pairing::<E, _, _>(lhs.numerator, rhs.denominator)
-        == pairing::<E, _, _>(lhs.denominator, rhs.numerator)
+    pairing::<E>(lhs) == pairing::<E>(rhs)
 }
 
 ///
@@ -265,25 +191,19 @@ pub enum Error {
 from_variant_impl!(Error, Io, io::Error);
 from_variant_impl!(Error, Verification, VerificationError);
 
-/// Contains terms of the form (s<sub>1</sub>, s<sub>1</sub><sup>x</sup>, H(s<sub>1</sub><sup>x</sup>)<sub>2</sub>, H(s<sub>1</sub><sup>x</sup>)<sub>2</sub><sup>x</sup>)
-/// for all x in τ, α and β, and some s chosen randomly by its creator. The function H "hashes into" the group G2. No points in the public key may be the identity.
 ///
-/// The elements in G2 are used to verify transformations of the accumulator. By its nature, the public key proves
-/// knowledge of τ, α and β.
-///
-/// It is necessary to verify `same_ratio`((s<sub>1</sub>, s<sub>1</sub><sup>x</sup>), (H(s<sub>1</sub><sup>x</sup>)<sub>2</sub>, H(s<sub>1</sub><sup>x</sup>)<sub>2</sub><sup>x</sup>)).
 pub struct PublicKey<E>
 where
     E: PairingEngine,
 {
     ///
-    pub tau_g1_ratio: G1Ratio<E>,
+    pub tau_g1_ratio: (E::G1Affine, E::G1Affine),
 
     ///
-    pub alpha_g1_ratio: G1Ratio<E>,
+    pub alpha_g1_ratio: (E::G1Affine, E::G1Affine),
 
     ///
-    pub beta_g1_ratio: G1Ratio<E>,
+    pub beta_g1_ratio: (E::G1Affine, E::G1Affine),
 
     ///
     pub tau_g2: E::G2Affine,
@@ -301,23 +221,16 @@ impl Serialize for PublicKey<Bls12_381> {
     where
         W: Write,
     {
-        /*
-        write_point(writer, &self.tau_g1.0, UseCompression::No)?;
-        write_point(writer, &self.tau_g1.1, UseCompression::No)?;
-
-        write_point(writer, &self.alpha_g1.0, UseCompression::No)?;
-        write_point(writer, &self.alpha_g1.1, UseCompression::No)?;
-
-        write_point(writer, &self.beta_g1.0, UseCompression::No)?;
-        write_point(writer, &self.beta_g1.1, UseCompression::No)?;
-
-        write_point(writer, &self.tau_g2, UseCompression::No)?;
-        write_point(writer, &self.alpha_g2, UseCompression::No)?;
-        write_point(writer, &self.beta_g2, UseCompression::No)?;
-
+        writer.write_all(&group_uncompressed(&self.tau_g1_ratio.0))?;
+        writer.write_all(&group_uncompressed(&self.tau_g1_ratio.1))?;
+        writer.write_all(&group_uncompressed(&self.alpha_g1_ratio.0))?;
+        writer.write_all(&group_uncompressed(&self.alpha_g1_ratio.1))?;
+        writer.write_all(&group_uncompressed(&self.beta_g1_ratio.0))?;
+        writer.write_all(&group_uncompressed(&self.beta_g1_ratio.1))?;
+        writer.write_all(&group_uncompressed(&self.tau_g2))?;
+        writer.write_all(&group_uncompressed(&self.alpha_g2))?;
+        writer.write_all(&group_uncompressed(&self.beta_g2))?;
         Ok(())
-        */
-        todo!()
     }
 }
 
@@ -370,7 +283,7 @@ impl Deserialize for PublicKey<Bls12_381> {
 
 ///
 #[inline]
-fn group_uncompressed_encoding<G>(point: &G) -> Vec<u8>
+fn group_uncompressed<G>(point: &G) -> Vec<u8>
 where
     G: AffineCurve,
 {
@@ -391,7 +304,7 @@ where
 
 ///
 #[inline]
-fn group_compressed_encoding<G>(point: &G) -> Vec<u8>
+fn group_compressed<G>(point: &G) -> Vec<u8>
 where
     G: AffineCurve,
 {
@@ -433,16 +346,20 @@ pub struct ResponseDigest([u8; 64]);
 impl ResponseDigest {
     ///
     #[inline]
-    pub fn hash_to_group<E>(self, personalization: u8, ratio: G1Ratio<E>) -> E::G2Affine
+    pub fn hash_to_group<E>(
+        self,
+        personalization: u8,
+        ratio: (E::G1Affine, E::G1Affine),
+    ) -> E::G2Prepared
     where
         E: PairingEngine,
     {
         let mut hasher = Blake2b::default();
         hasher.update(&[personalization]);
         hasher.update(&self.0);
-        hasher.update(group_uncompressed_encoding(&ratio.numerator));
-        hasher.update(group_uncompressed_encoding(&ratio.denominator));
-        hash_to_group(into_array_unchecked(hasher.finalize()))
+        hasher.update(group_uncompressed(&ratio.0));
+        hasher.update(group_uncompressed(&ratio.1));
+        E::G2Prepared::from(hash_to_group(into_array_unchecked(hasher.finalize())))
     }
 }
 
@@ -460,31 +377,25 @@ impl fmt::Display for ResponseDigest {
     }
 }
 
-/// The `Accumulator` is an object that participants of the ceremony contribute
-/// randomness to. This object contains powers of trapdoor `tau` in G1 and in G2 over
-/// fixed generators, and additionally in G1 over two other generators of exponents
-/// `alpha` and `beta` over those fixed generators. In other words:
 ///
-/// * (τ, τ<sup>2</sup>, ..., τ<sup>2<sup>22</sup> - 2</sup>, α, ατ, ατ<sup>2</sup>, ..., ατ<sup>2<sup>21</sup> - 1</sup>, β, βτ, βτ<sup>2</sup>, ..., βτ<sup>2<sup>21</sup> - 1</sup>)<sub>1</sub>
-/// * (β, τ, τ<sup>2</sup>, ..., τ<sup>2<sup>21</sup> - 1</sup>)<sub>2</sub>
 #[derive(Clone, Eq, PartialEq)]
 pub struct Accumulator<E>
 where
     E: PairingEngine,
 {
-    /// tau^0, tau^1, tau^2, ..., tau^{TAU_POWERS_G1_LENGTH - 1}
+    ///
     pub tau_powers_g1: Box<[E::G1Affine; TAU_POWERS_G1_LENGTH]>,
 
-    /// tau^0, tau^1, tau^2, ..., tau^{TAU_POWERS_LENGTH - 1}
+    ///
     pub tau_powers_g2: Box<[E::G2Affine; TAU_POWERS_LENGTH]>,
 
-    /// alpha * tau^0, alpha * tau^1, alpha * tau^2, ..., alpha * tau^{TAU_POWERS_LENGTH - 1}
+    ///
     pub alpha_tau_powers_g1: Box<[E::G1Affine; TAU_POWERS_LENGTH]>,
 
-    /// beta * tau^0, beta * tau^1, beta * tau^2, ..., beta * tau^{TAU_POWERS_LENGTH - 1}
+    ///
     pub beta_tau_powers_g1: Box<[E::G1Affine; TAU_POWERS_LENGTH]>,
 
-    /// beta
+    ///
     pub beta_g2: E::G2Affine,
 }
 
@@ -535,30 +446,42 @@ where
         let alpha_g2_s = response_digest.hash_to_group::<E>(1, key.alpha_g1_ratio);
         let beta_g2_s = response_digest.hash_to_group::<E>(2, key.beta_g1_ratio);
 
-        /*
-        // Check the proofs-of-knowledge for tau/alpha/beta
-        if !same_ratio(key.tau_ratio, Ratio::new(tau_g2_s, key.tau_g2)) {
-            return Err(Error::TauKnowledgeProof);
-        }
-        if !same_ratio(key.alpha_ratio, Ratio::new(alpha_g2_s, key.alpha)) {
-            return Err(Error::AlphaKnowledgeProof);
-        }
-        if !same_ratio(key.beta_ratio, Ratio::new(beta_g2_s, key.beta)) {
-            return Err(Error::BetaKnowledgeProof);
+        let key_tau_g2 = key.tau_g2.into();
+        if !same_pairing::<E>(
+            &(key.tau_g1_ratio.0.into(), key_tau_g2),
+            &(key.tau_g1_ratio.1.into(), tau_g2_s),
+        ) {
+            return Err(VerificationError::TauKnowledgeProof);
         }
 
-        // Check the correctness of the generators for tau powers
+        let key_alpha_g2 = key.alpha_g2.into();
+        if !same_pairing::<E>(
+            &(key.alpha_g1_ratio.0.into(), key_alpha_g2),
+            &(key.alpha_g1_ratio.0.into(), alpha_g2_s),
+        ) {
+            return Err(VerificationError::AlphaKnowledgeProof);
+        }
+
+        let key_beta_g2 = key.beta_g2.into();
+        if !same_pairing::<E>(
+            &(key.beta_g1_ratio.0.into(), key_beta_g2),
+            &(key.beta_g1_ratio.0.into(), beta_g2_s),
+        ) {
+            return Err(VerificationError::BetaKnowledgeProof);
+        }
+
         if next.tau_powers_g1[0] != E::G1Affine::prime_subgroup_generator() {
-            return Err(Error::PrimeSubgroupGeneratorG1);
+            return Err(VerificationError::PrimeSubgroupGeneratorG1);
         }
         if next.tau_powers_g2[0] != E::G2Affine::prime_subgroup_generator() {
-            return Err(Error::PrimeSubgroupGeneratorG2);
+            return Err(VerificationError::PrimeSubgroupGeneratorG2);
         }
 
+        /*
         // Did the participant multiply the previous tau by the new one?
         if !same_ratio(
             (self.tau_powers_g1[1], next.tau_powers_g1[1]),
-            (tau_g2_s, key.tau_g2),
+            (tau_g2_s, key_tau_g2),
         ) {
             return Err(Error::TauMultiplication);
         }
@@ -566,7 +489,7 @@ where
         // Did the participant multiply the previous alpha by the new one?
         if !same_ratio(
             (self.alpha_tau_powers_g1[0], next.alpha_tau_powers_g1[0]),
-            (alpha_g2_s, key.alpha_g2),
+            (alpha_g2_s, key_alpha_g2),
         ) {
             return Err(Error::AlphaMultiplication);
         }
@@ -574,45 +497,53 @@ where
         // Did the participant multiply the previous beta by the new one?
         if !same_ratio(
             (self.beta_tau_powers_g1[0], next.beta_tau_powers_g1[0]),
-            (beta_g2_s, key.beta_g2),
+            (beta_g2_s, key_beta_g2),
         ) {
             return false;
         }
+
         if !same_ratio(
             (self.beta_tau_powers_g1[0], next.beta_tau_powers_g1[0]),
             (self.beta_g2, next.beta_g2),
         ) {
             return false;
         }
-
-        // Are the powers of tau correct?
-        if !same_ratio(
-            power_pairs(&next.tau_powers_g1),
-            (next.tau_powers_g2[0], next.tau_powers_g2[1]),
-        ) {
-            return false;
-        }
-        if !same_ratio(
-            power_pairs(&next.tau_powers_g2),
-            (next.tau_powers_g1[0], next.tau_powers_g1[1]),
-        ) {
-            return false;
-        }
-        if !same_ratio(
-            power_pairs(&next.alpha_tau_powers_g1),
-            (next.tau_powers_g2[0], next.tau_powers_g2[1]),
-        ) {
-            return false;
-        }
-        if !same_ratio(
-            power_pairs(&next.beta_tau_powers_g1),
-            (next.tau_powers_g2[0], next.tau_powers_g2[1]),
-        ) {
-            return false;
-        }
-
         */
 
+        /* TODO:
+        if !same_ratio(
+            (next.tau_powers_g1[0], next.tau_powers_g1[1]),
+            power_pairs(&next.tau_powers_g2),
+        ) {
+            return false;
+        }
+
+        let next_tau_powers_g2_0 = E::G2Prepared::from(next.tau_powers_g2[0]);
+        let next_tau_powers_g2_1 = E::G2Prepared::from(next.tau_powers_g2[1]);
+
+        if !same_ratio(
+            power_pairs(&next.tau_powers_g1),
+            (next_tau_powers_g2_0, next_tau_powers_g2_1),
+        ) {
+            return false;
+        }
+
+        if !same_ratio(
+            power_pairs(&next.alpha_tau_powers_g1),
+            (next_tau_powers_g2_0, next_tau_powers_g2_1),
+        ) {
+            return false;
+        }
+
+        if !same_ratio(
+            power_pairs(&next.beta_tau_powers_g1),
+            (next_tau_powers_g2_0, next.tau_powers_g2_1),
+        ) {
+            return false;
+        }
+        */
+
+        *self = next;
         Ok(())
     }
 }
@@ -659,6 +590,35 @@ impl SerializeCompressed for Accumulator<Bls12_381> {
     where
         W: Write,
     {
+        /*
+        pub fn serialize<W: Write>(
+            &self,
+            writer: &mut W,
+            compression: UseCompression
+        ) -> io::Result<()>
+        {
+            fn write_all<W: Write, C: CurveAffine>(
+                writer: &mut W,
+                c: &[C],
+                compression: UseCompression
+            ) -> io::Result<()>
+            {
+                for c in c {
+                    write_point(writer, c, compression)?;
+                }
+
+                Ok(())
+            }
+
+            write_all(writer, &self.tau_powers_g1, compression)?;
+            write_all(writer, &self.tau_powers_g2, compression)?;
+            write_all(writer, &self.alpha_tau_powers_g1, compression)?;
+            write_all(writer, &self.beta_tau_powers_g1, compression)?;
+            write_all(writer, &[self.beta_g2], compression)?;
+
+            Ok(())
+        }
+            */
         todo!()
     }
 }
@@ -756,29 +716,20 @@ impl Deserialize for Accumulator<Bls12_381> {
     }
 }
 
-/*
-/// Computes a random linear combination over v1/v2.
 ///
-/// Checking that many pairs of elements are exponentiated by
-/// the same `x` can be achieved (with high probability) with
-/// the following technique:
-///
-/// Given v1 = [a, b, c] and v2 = [as, bs, cs], compute
-/// (a*r1 + b*r2 + c*r3, (as)*r1 + (bs)*r2 + (cs)*r3) for some
-/// random r1, r2, r3. Given (g, g^s)...
-///
-/// e(g, (as)*r1 + (bs)*r2 + (cs)*r3) = e(g^s, a*r1 + b*r2 + c*r3)
-///
-/// ... with high probability.
-fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
+#[inline]
+fn merge_pairs<G>(lhs: &[G], rhs: &[G]) -> (G, G)
+where
+    G: AffineCurve,
+{
+    /* TODO:
     use rand::thread_rng;
     use std::sync::{Arc, Mutex};
-    assert_eq!(v1.len(), v2.len());
-    let chunk = (v1.len() / num_cpus::get()) + 1;
+    let chunk = (N / num_cpus::get()) + 1;
     let s = Arc::new(Mutex::new(G::Projective::zero()));
     let sx = Arc::new(Mutex::new(G::Projective::zero()));
     crossbeam::scope(|scope| {
-        for (v1, v2) in v1.chunks(chunk).zip(v2.chunks(chunk)) {
+        for (v1, v2) in lhs.chunks(chunk).zip(rhs.chunks(chunk)) {
             let s = s.clone();
             let sx = sx.clone();
             scope.spawn(move || {
@@ -793,7 +744,6 @@ fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
                     let mut wnaf = wnaf.scalar(rho.into_repr());
                     let v1 = wnaf.base(v1.into_projective());
                     let v2 = wnaf.base(v2.into_projective());
-
                     local_s.add_assign(&v1);
                     local_sx.add_assign(&v2);
                 }
@@ -805,14 +755,17 @@ fn merge_pairs<G: CurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
     let s = s.lock().unwrap().into_affine();
     let sx = sx.lock().unwrap().into_affine();
     (s, sx)
-}
-*/
-
-/// Construct a single pair (s, s^x) for a vector of the form [1, x, x^2, x^3, ...].
-#[inline]
-fn power_pairs<G>(v: &[G]) -> (G, G) {
-    // TODO: merge_pairs(&v[0..(v.len() - 1)], &v[1..])
+    */
     todo!()
+}
+
+///
+#[inline]
+fn power_pairs<G, const N: usize>(points: &[G; N]) -> (G, G)
+where
+    G: AffineCurve,
+{
+    merge_pairs(&points[..(N - 1)], &points[1..])
 }
 
 ///
