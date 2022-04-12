@@ -357,27 +357,83 @@ pub mod powersoftau {
     }
 
     /// Contribution Public Key
-    pub struct PublicKey<P>
+    pub struct PublicKey<C>
     where
-        P: Pairing,
+        C: Configuration,
     {
         ///
-        tau_g1_ratio: (P::G1, P::G1),
+        tau_g1_ratio: (C::G1, C::G1),
 
         ///
-        alpha_g1_ratio: (P::G1, P::G1),
+        alpha_g1_ratio: (C::G1, C::G1),
 
         ///
-        beta_g1_ratio: (P::G1, P::G1),
+        beta_g1_ratio: (C::G1, C::G1),
 
         ///
-        tau_g2: P::G2,
+        tau_g2: C::G2,
 
         ///
-        alpha_g2: P::G2,
+        alpha_g2: C::G2,
 
         ///
-        beta_g2: P::G2,
+        beta_g2: C::G2,
+    }
+
+    impl<C> Deserialize for PublicKey<C>
+    where
+        C: Configuration,
+    {
+        type Error = io::Error;
+
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> DeserializeCompressed for PublicKey<C>
+    where
+        C: Configuration,
+    {
+        type Error = io::Error;
+
+        #[inline]
+        fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> Serialize for PublicKey<C>
+    where
+        C: Configuration,
+    {
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> SerializeCompressed for PublicKey<C>
+    where
+        C: Configuration,
+    {
+        #[inline]
+        fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
+        where
+            W: Write,
+        {
+            todo!()
+        }
     }
 
     /// Contribution Accumulator
@@ -417,7 +473,67 @@ pub mod powersoftau {
         }
     }
 
+    impl<C> Deserialize for Accumulator<C>
+    where
+        C: Configuration,
+    {
+        type Error = io::Error;
+
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> DeserializeCompressed for Accumulator<C>
+    where
+        C: Configuration,
+    {
+        type Error = io::Error;
+
+        #[inline]
+        fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> Serialize for Accumulator<C>
+    where
+        C: Configuration,
+    {
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+    }
+
+    impl<C> SerializeCompressed for Accumulator<C>
+    where
+        C: Configuration,
+    {
+        #[inline]
+        fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+    }
+
     ///
+    const HASHER_WRITER_EXPECT_MESSAGE: &str =
+        "The `Blake2b` hasher's `Write` implementation never returns an error.";
+
+    /// Powers of Tau Trusted Setup
     pub struct PowersOfTau<C>(PhantomData<C>)
     where
         C: Configuration;
@@ -427,21 +543,18 @@ pub mod powersoftau {
         C: Configuration,
     {
         type Accumulator = Accumulator<C>;
-        type PublicKey = PublicKey<C::Pairing>;
+        type PublicKey = PublicKey<C>;
         type Challenge = ChallengeDigest;
         type Response = ResponseDigest;
         type Error = Error;
 
         #[inline]
         fn challenge(last: &Self::Accumulator, last_response: &Self::Response) -> Self::Challenge {
-            /*
             let mut hasher = Blake2b::default();
-            hasher.update(response.0);
+            hasher.update(last_response.0);
             last.serialize(&mut hasher)
                 .expect(HASHER_WRITER_EXPECT_MESSAGE);
             ChallengeDigest(into_array_unchecked(hasher.finalize()))
-            */
-            todo!()
         }
 
         #[inline]
@@ -450,16 +563,14 @@ pub mod powersoftau {
             next_key: &Self::PublicKey,
             challenge: Self::Challenge,
         ) -> Self::Response {
-            /*
             let mut hasher = Blake2b::default();
             hasher.update(challenge.0);
             next.serialize_compressed(&mut hasher)
                 .expect(HASHER_WRITER_EXPECT_MESSAGE);
-            key.serialize(&mut hasher)
+            next_key
+                .serialize(&mut hasher)
                 .expect(HASHER_WRITER_EXPECT_MESSAGE);
             ResponseDigest(into_array_unchecked(hasher.finalize()))
-            */
-            todo!()
         }
 
         #[inline]
@@ -478,13 +589,11 @@ pub mod powersoftau {
                 (next_key.tau_g1_ratio.1, tau_g2_s),
             )
             .ok_or(VerificationError::TauKnowledgeProof)?;
-
             let ((_, key_alpha_g2), (_, alpha_g2_s)) = C::Pairing::same(
                 (next_key.alpha_g1_ratio.0, next_key.alpha_g2),
                 (next_key.alpha_g1_ratio.1, alpha_g2_s),
             )
             .ok_or(VerificationError::AlphaKnowledgeProof)?;
-
             let ((_, key_beta_g2), (_, beta_g2_s)) = C::Pairing::same(
                 (next_key.beta_g1_ratio.0, next_key.beta_g2),
                 (next_key.beta_g1_ratio.1, beta_g2_s),
@@ -503,48 +612,44 @@ pub mod powersoftau {
                 (next.tau_powers_g1[1].clone(), tau_g2_s),
             )
             .ok_or(VerificationError::TauMultiplication)?;
-
             C::Pairing::same(
                 (last.alpha_tau_powers_g1[0].clone(), key_alpha_g2),
                 (next.alpha_tau_powers_g1[0].clone(), alpha_g2_s),
             )
             .ok_or(VerificationError::AlphaMultiplication)?;
-
-            /*
-            let ((self_beta_tau_powers_g1_0, _), (next_beta_tau_powers_g1_0, _)) = P::same(
-                (self.beta_tau_powers_g1[0], key_beta_g2),
-                (next.beta_tau_powers_g1[0], beta_g2_s),
-            )
-            .ok_or(VerificationError::BetaMultiplication)?;
-
-            P::same(
-                (self_beta_tau_powers_g1_0, next.beta_g2),
-                (next_beta_tau_powers_g1_0, self.beta_g2),
+            let ((last_beta_tau_powers_g1_0, _), (next_beta_tau_powers_g1_0, _)) =
+                C::Pairing::same(
+                    (last.beta_tau_powers_g1[0].clone(), key_beta_g2),
+                    (next.beta_tau_powers_g1[0].clone(), beta_g2_s),
+                )
+                .ok_or(VerificationError::BetaMultiplication)?;
+            C::Pairing::same(
+                (last_beta_tau_powers_g1_0, next.beta_g2.clone()),
+                (next_beta_tau_powers_g1_0, last.beta_g2),
             )
             .ok_or(VerificationError::BetaMultiplication)?;
 
             let (lhs, rhs) = power_pairs(&next.tau_powers_g2);
-            P::same((next.tau_powers_g1[0], rhs), (next.tau_powers_g1[1], lhs))
-                .ok_or(VerificationError::PowersOfTau)?;
-
+            C::Pairing::same(
+                (next.tau_powers_g1[0].clone(), rhs),
+                (next.tau_powers_g1[1].clone(), lhs),
+            )
+            .ok_or(VerificationError::PowersOfTau)?;
             let (lhs, rhs) = power_pairs(&next.tau_powers_g1);
-            let ((_, next_tau_powers_g2_1), (_, next_tau_powers_g2_0)) =
-                P::same((lhs, next.tau_powers_g2[1]), (rhs, next.tau_powers_g2[0]))
-                    .ok_or(VerificationError::PowersOfTau)?;
-
+            let ((_, next_tau_powers_g2_1), (_, next_tau_powers_g2_0)) = C::Pairing::same(
+                (lhs, next.tau_powers_g2[1].clone()),
+                (rhs, next.tau_powers_g2[0].clone()),
+            )
+            .ok_or(VerificationError::PowersOfTau)?;
             let (lhs, rhs) = power_pairs(&next.alpha_tau_powers_g1);
             let ((_, next_tau_powers_g2_1), (_, next_tau_powers_g2_0)) =
-                P::same((lhs, next_tau_powers_g2_1), (rhs, next_tau_powers_g2_0))
+                C::Pairing::same((lhs, next_tau_powers_g2_1), (rhs, next_tau_powers_g2_0))
                     .ok_or(VerificationError::PowersOfTau)?;
-
             let (lhs, rhs) = power_pairs(&next.beta_tau_powers_g1);
-            P::same((lhs, next_tau_powers_g2_1), (rhs, next_tau_powers_g2_0))
+            C::Pairing::same((lhs, next_tau_powers_g2_1), (rhs, next_tau_powers_g2_0))
                 .ok_or(VerificationError::PowersOfTau)?;
 
-            *self = next;
-            Ok(())
-            */
-            todo!()
+            Ok((next, next_response))
         }
     }
 }
@@ -629,11 +734,59 @@ pub trait DeserializeCompressed: Sized {
         R: Read;
 }
 
-/*
 ///
-const HASHER_WRITER_EXPECT_MESSAGE: &str =
-    "The `Blake2b` hasher's `Write` implementation never returns an error.";
+#[inline]
+fn merge_pairs<G>(lhs: &[G], rhs: &[G]) -> (G, G)
+where
+    G: AffineCurve,
+{
+    /* TODO:
+    use rand::thread_rng;
+    use std::sync::{Arc, Mutex};
+    let chunk = (N / num_cpus::get()) + 1;
+    let s = Arc::new(Mutex::new(G::Projective::zero()));
+    let sx = Arc::new(Mutex::new(G::Projective::zero()));
+    crossbeam::scope(|scope| {
+        for (v1, v2) in lhs.chunks(chunk).zip(rhs.chunks(chunk)) {
+            let s = s.clone();
+            let sx = sx.clone();
+            scope.spawn(move || {
+                // We do not need to be overly cautious of the RNG
+                // used for this check.
+                let rng = &mut thread_rng();
+                let mut wnaf = Wnaf::new();
+                let mut local_s = G::Projective::zero();
+                let mut local_sx = G::Projective::zero();
+                for (v1, v2) in v1.iter().zip(v2.iter()) {
+                    let rho = G::Scalar::rand(rng);
+                    let mut wnaf = wnaf.scalar(rho.into_repr());
+                    let v1 = wnaf.base(v1.into_projective());
+                    let v2 = wnaf.base(v2.into_projective());
+                    local_s.add_assign(&v1);
+                    local_sx.add_assign(&v2);
+                }
+                s.lock().unwrap().add_assign(&local_s);
+                sx.lock().unwrap().add_assign(&local_sx);
+            });
+        }
+    });
+    let s = s.lock().unwrap().into_affine();
+    let sx = sx.lock().unwrap().into_affine();
+    (s, sx)
+    */
+    todo!()
+}
 
+///
+#[inline]
+fn power_pairs<G>(points: &[G]) -> (G, G)
+// TODO: where G: AffineCurve,
+{
+    // TODO: merge_pairs(&points[..(points.len() - 1)], &points[1..])
+    todo!()
+}
+
+/*
 /// The accumulator supports circuits with 2^21 multiplication gates.
 pub const TAU_POWERS_LENGTH: usize = 1 << 21;
 
@@ -921,58 +1074,6 @@ impl Deserialize for Accumulator<Bls12_381> {
     }
 }
 */
-
-///
-#[inline]
-fn merge_pairs<G>(lhs: &[G], rhs: &[G]) -> (G, G)
-where
-    G: AffineCurve,
-{
-    /* TODO:
-    use rand::thread_rng;
-    use std::sync::{Arc, Mutex};
-    let chunk = (N / num_cpus::get()) + 1;
-    let s = Arc::new(Mutex::new(G::Projective::zero()));
-    let sx = Arc::new(Mutex::new(G::Projective::zero()));
-    crossbeam::scope(|scope| {
-        for (v1, v2) in lhs.chunks(chunk).zip(rhs.chunks(chunk)) {
-            let s = s.clone();
-            let sx = sx.clone();
-            scope.spawn(move || {
-                // We do not need to be overly cautious of the RNG
-                // used for this check.
-                let rng = &mut thread_rng();
-                let mut wnaf = Wnaf::new();
-                let mut local_s = G::Projective::zero();
-                let mut local_sx = G::Projective::zero();
-                for (v1, v2) in v1.iter().zip(v2.iter()) {
-                    let rho = G::Scalar::rand(rng);
-                    let mut wnaf = wnaf.scalar(rho.into_repr());
-                    let v1 = wnaf.base(v1.into_projective());
-                    let v2 = wnaf.base(v2.into_projective());
-                    local_s.add_assign(&v1);
-                    local_sx.add_assign(&v2);
-                }
-                s.lock().unwrap().add_assign(&local_s);
-                sx.lock().unwrap().add_assign(&local_sx);
-            });
-        }
-    });
-    let s = s.lock().unwrap().into_affine();
-    let sx = sx.lock().unwrap().into_affine();
-    (s, sx)
-    */
-    todo!()
-}
-
-///
-#[inline]
-fn power_pairs<G, const N: usize>(points: &[G; N]) -> (G, G)
-where
-    G: AffineCurve,
-{
-    merge_pairs(&points[..(N - 1)], &points[1..])
-}
 
 ///
 pub const ROUNDS: usize = 89;
