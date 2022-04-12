@@ -1,7 +1,7 @@
 //! Arkworks Sapling Powers of Tau
 
-use ark_bls12_381::{Bls12_381, G1Affine, G2Affine};
-use ark_ec::{AffineCurve, PairingEngine};
+use ark_ec::PairingEngine;
+use ark_ff::{UniformRand, Zero};
 use blake2::{Blake2b, Digest};
 use byteorder::{BigEndian, ReadBytesExt};
 use core::{
@@ -9,10 +9,14 @@ use core::{
     hash::Hash,
     iter,
     marker::PhantomData,
+    ops::AddAssign,
 };
-use rand::{CryptoRng, RngCore, SeedableRng};
+use rand::{rngs::OsRng, CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::io::{self, Read, Write};
+
+#[cfg(feature = "rayon")]
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 /// Trusted Setup Verifier
 pub trait TrustedSetup {
@@ -208,23 +212,94 @@ where
 pub mod powersoftau {
     use super::*;
 
+    /// Curve
+    pub trait Group:
+        AddAssign
+        + Clone
+        + Deserialize
+        + DeserializeCompressed
+        + PartialEq
+        + Send
+        + Serialize
+        + SerializeCompressed
+        + Sync
+        + Zero
+    {
+        /// Scalar Field
+        type Scalar: Send + UniformRand;
+
+        /// Multiplies `self` by `scalar`.
+        fn mul(&self, scalar: &Self::Scalar) -> Self;
+    }
+
+    ///
+    #[inline]
+    fn merge_pairs<G>(lhs: &[G], rhs: &[G]) -> (G, G)
+    where
+        G: Group,
+    {
+        assert_eq!(lhs.len(), rhs.len());
+        into_par_iter(0..lhs.len())
+            .map(|_| {
+                let mut rng = OsRng;
+                G::Scalar::rand(&mut rng)
+            })
+            .zip(lhs)
+            .zip(rhs)
+            .map(|((rho, lhs), rhs)| (lhs.mul(&rho), rhs.mul(&rho)))
+            .reduce(
+                || (Zero::zero(), Zero::zero()),
+                |mut acc, next| {
+                    acc.0 += next.0;
+                    acc.1 += next.1;
+                    acc
+                },
+            )
+    }
+
+    ///
+    #[inline]
+    fn power_pairs<G>(points: &[G]) -> (G, G)
+    where
+        G: Group,
+    {
+        merge_pairs(&points[..(points.len() - 1)], &points[1..])
+    }
+
+    ///
+    #[inline]
+    fn hash_to_group<G>(digest: [u8; 32]) -> G
+    where
+        G: Group,
+    {
+        let mut digest = digest.as_slice();
+        let mut seed = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let word = digest
+                .read_u32::<BigEndian>()
+                .expect("This is always possible since we have enough bytes to begin with.");
+            seed.extend(word.to_le_bytes());
+        }
+        sample_group(&mut ChaCha20Rng::from_seed(into_array_unchecked(seed)))
+    }
+
+    ///
+    #[inline]
+    fn sample_group<G, R>(rng: &mut R) -> G
+    where
+        G: Group,
+        R: CryptoRng + RngCore + ?Sized,
+    {
+        todo!()
+    }
+
     /// Powers of Tau Configuration
     pub trait Configuration {
         /// Left Group of the Pairing
-        type G1: Clone
-            + Deserialize
-            + DeserializeCompressed
-            + PartialEq
-            + Serialize
-            + SerializeCompressed;
+        type G1: Group;
 
         /// Right Group of the Pairing
-        type G2: Clone
-            + Deserialize
-            + DeserializeCompressed
-            + PartialEq
-            + Serialize
-            + SerializeCompressed;
+        type G2: Group;
 
         /// Pairing
         type Pairing: Pairing<G1 = Self::G1, G2 = Self::G2>;
@@ -235,10 +310,10 @@ pub mod powersoftau {
         /// Number of Powers of Tau in G2 Supported by this Setup
         const G2_POWERS: usize;
 
-        ///
+        /// Returns a chosen prime subgroup generator for G1.
         fn g1_prime_subgroup_generator() -> Self::G1;
 
-        ///
+        /// Returns a chosen prime subgroup generator for G2.
         fn g2_prime_subgroup_generator() -> Self::G2;
     }
 
@@ -285,36 +360,6 @@ pub mod powersoftau {
     from_variant_impl!(Error, Io, io::Error);
     from_variant_impl!(Error, Verification, VerificationError);
 
-    ///
-    #[inline]
-    fn hash_to_group<G>(digest: [u8; 32]) -> G
-    where
-        G: AffineCurve,
-    {
-        /*
-        let mut digest = digest.as_slice();
-        let mut seed = Vec::with_capacity(8);
-        for _ in 0..8 {
-            let word = digest
-                .read_u32::<BigEndian>()
-                .expect("This is always possible since we have enough bytes to begin with.");
-            seed.extend(word.to_le_bytes());
-        }
-        sample_group(&mut ChaCha20Rng::from_seed(into_array_unchecked(seed)))
-        */
-        todo!()
-    }
-
-    ///
-    #[inline]
-    fn sample_group<G, R>(rng: &mut R) -> G
-    where
-        G: AffineCurve,
-        R: CryptoRng + RngCore + ?Sized,
-    {
-        todo!()
-    }
-
     /// Challenge Digest
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     pub struct ChallengeDigest([u8; 64]);
@@ -330,15 +375,12 @@ pub mod powersoftau {
         where
             C: Configuration,
         {
-            /*
             let mut hasher = Blake2b::default();
             hasher.update(&[personalization]);
             hasher.update(&self.0);
-            hasher.update(group_uncompressed(&ratio.0));
-            hasher.update(group_uncompressed(&ratio.1));
-            P::G2Prepared::from(hash_to_group(into_array_unchecked(hasher.finalize())))
-            */
-            todo!()
+            ratio.0.serialize(&mut hasher).expect("");
+            ratio.1.serialize(&mut hasher).expect("");
+            hash_to_group(into_array_unchecked(hasher.finalize()))
         }
     }
 
@@ -354,6 +396,27 @@ pub mod powersoftau {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             fmt::Display::fmt(&hex::encode(self.0), f)
         }
+    }
+
+    ///
+    pub enum PublicKeyDeserializeError<G1, G2> {
+        ///
+        IsZero,
+
+        ///
+        G1Error(G1),
+
+        ///
+        G2Error(G2),
+    }
+
+    ///
+    pub enum NonZeroDeserializeError<E> {
+        ///
+        IsZero,
+
+        ///
+        Error(E),
     }
 
     /// Contribution Public Key
@@ -384,13 +447,39 @@ pub mod powersoftau {
     where
         C: Configuration,
     {
-        type Error = io::Error;
+        type Error =
+            PublicKeyDeserializeError<<C::G1 as Deserialize>::Error, <C::G1 as Deserialize>::Error>;
 
         #[inline]
         fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
         where
             R: Read,
         {
+            /*
+            #[inline]
+            fn read<G, R>(
+                reader: &mut R,
+            ) -> Result<G, NonZeroDeserializeError<<G as Deserialize>::Error>>
+            where
+                G: Group,
+                R: Read,
+            {
+                let group = G::deserialize(reader)?;
+                if group.is_zero() {
+                    Err(NonZeroDeserializeError::IsZero)
+                } else {
+                    Ok(group)
+                }
+            }
+            Ok(Self {
+                tau_g1_ratio: (read(reader)?, read(reader)?),
+                alpha_g1_ratio: (read(reader)?, read(reader)?),
+                beta_g1_ratio: (read(reader)?, read(reader)?),
+                tau_g2: read(reader)?,
+                alpha_g2: read(reader)?,
+                beta_g2: read(reader)?,
+            })
+            */
             todo!()
         }
     }
@@ -419,7 +508,16 @@ pub mod powersoftau {
         where
             W: Write,
         {
-            todo!()
+            self.tau_g1_ratio.0.serialize(writer)?;
+            self.tau_g1_ratio.1.serialize(writer)?;
+            self.alpha_g1_ratio.0.serialize(writer)?;
+            self.alpha_g1_ratio.1.serialize(writer)?;
+            self.beta_g1_ratio.0.serialize(writer)?;
+            self.beta_g1_ratio.1.serialize(writer)?;
+            self.tau_g2.serialize(writer)?;
+            self.alpha_g2.serialize(writer)?;
+            self.beta_g2.serialize(writer)?;
+            Ok(())
         }
     }
 
@@ -432,7 +530,16 @@ pub mod powersoftau {
         where
             W: Write,
         {
-            todo!()
+            self.tau_g1_ratio.0.serialize_compressed(writer)?;
+            self.tau_g1_ratio.1.serialize_compressed(writer)?;
+            self.alpha_g1_ratio.0.serialize_compressed(writer)?;
+            self.alpha_g1_ratio.1.serialize_compressed(writer)?;
+            self.beta_g1_ratio.0.serialize_compressed(writer)?;
+            self.beta_g1_ratio.1.serialize_compressed(writer)?;
+            self.tau_g2.serialize_compressed(writer)?;
+            self.alpha_g2.serialize_compressed(writer)?;
+            self.beta_g2.serialize_compressed(writer)?;
+            Ok(())
         }
     }
 
@@ -445,13 +552,13 @@ pub mod powersoftau {
         tau_powers_g1: Vec<C::G1>,
 
         ///
+        tau_powers_g2: Vec<C::G2>,
+
+        ///
         alpha_tau_powers_g1: Vec<C::G1>,
 
         ///
         beta_tau_powers_g1: Vec<C::G1>,
-
-        ///
-        tau_powers_g2: Vec<C::G2>,
 
         ///
         beta_g2: C::G2,
@@ -465,9 +572,9 @@ pub mod powersoftau {
         fn default() -> Self {
             Self {
                 tau_powers_g1: vec![C::g1_prime_subgroup_generator(); C::G1_POWERS],
+                tau_powers_g2: vec![C::g2_prime_subgroup_generator(); C::G2_POWERS],
                 alpha_tau_powers_g1: vec![C::g1_prime_subgroup_generator(); C::G2_POWERS],
                 beta_tau_powers_g1: vec![C::g1_prime_subgroup_generator(); C::G2_POWERS],
-                tau_powers_g2: vec![C::g2_prime_subgroup_generator(); C::G2_POWERS],
                 beta_g2: C::g2_prime_subgroup_generator(),
             }
         }
@@ -512,7 +619,20 @@ pub mod powersoftau {
         where
             W: Write,
         {
-            todo!()
+            for elem in &self.tau_powers_g1 {
+                elem.serialize(writer)?;
+            }
+            for elem in &self.tau_powers_g2 {
+                elem.serialize(writer)?;
+            }
+            for elem in &self.alpha_tau_powers_g1 {
+                elem.serialize(writer)?;
+            }
+            for elem in &self.beta_tau_powers_g1 {
+                elem.serialize(writer)?;
+            }
+            self.beta_g2.serialize(writer)?;
+            Ok(())
         }
     }
 
@@ -525,7 +645,20 @@ pub mod powersoftau {
         where
             W: Write,
         {
-            todo!()
+            for elem in &self.tau_powers_g1 {
+                elem.serialize_compressed(writer)?;
+            }
+            for elem in &self.tau_powers_g2 {
+                elem.serialize_compressed(writer)?;
+            }
+            for elem in &self.alpha_tau_powers_g1 {
+                elem.serialize_compressed(writer)?;
+            }
+            for elem in &self.beta_tau_powers_g1 {
+                elem.serialize_compressed(writer)?;
+            }
+            self.beta_g2.serialize_compressed(writer)?;
+            Ok(())
         }
     }
 
@@ -715,7 +848,7 @@ pub trait SerializeCompressed {
 /// Deserialization Trait
 pub trait Deserialize: Sized {
     ///
-    type Error: From<io::Error>;
+    type Error;
 
     ///
     fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -726,7 +859,7 @@ pub trait Deserialize: Sized {
 /// Compressed Deserialization Trait
 pub trait DeserializeCompressed: Sized {
     ///
-    type Error: From<io::Error>;
+    type Error;
 
     ///
     fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -735,55 +868,18 @@ pub trait DeserializeCompressed: Sized {
 }
 
 ///
-#[inline]
-fn merge_pairs<G>(lhs: &[G], rhs: &[G]) -> (G, G)
-where
-    G: AffineCurve,
-{
-    /* TODO:
-    use rand::thread_rng;
-    use std::sync::{Arc, Mutex};
-    let chunk = (N / num_cpus::get()) + 1;
-    let s = Arc::new(Mutex::new(G::Projective::zero()));
-    let sx = Arc::new(Mutex::new(G::Projective::zero()));
-    crossbeam::scope(|scope| {
-        for (v1, v2) in lhs.chunks(chunk).zip(rhs.chunks(chunk)) {
-            let s = s.clone();
-            let sx = sx.clone();
-            scope.spawn(move || {
-                // We do not need to be overly cautious of the RNG
-                // used for this check.
-                let rng = &mut thread_rng();
-                let mut wnaf = Wnaf::new();
-                let mut local_s = G::Projective::zero();
-                let mut local_sx = G::Projective::zero();
-                for (v1, v2) in v1.iter().zip(v2.iter()) {
-                    let rho = G::Scalar::rand(rng);
-                    let mut wnaf = wnaf.scalar(rho.into_repr());
-                    let v1 = wnaf.base(v1.into_projective());
-                    let v2 = wnaf.base(v2.into_projective());
-                    local_s.add_assign(&v1);
-                    local_sx.add_assign(&v2);
-                }
-                s.lock().unwrap().add_assign(&local_s);
-                sx.lock().unwrap().add_assign(&local_sx);
-            });
-        }
-    });
-    let s = s.lock().unwrap().into_affine();
-    let sx = sx.lock().unwrap().into_affine();
-    (s, sx)
-    */
-    todo!()
+#[cfg(not(feature = "rayon"))]
+fn into_par_iter<I>(iter: I) -> I {
+    iter
 }
 
 ///
-#[inline]
-fn power_pairs<G>(points: &[G]) -> (G, G)
-// TODO: where G: AffineCurve,
+#[cfg(feature = "rayon")]
+fn into_par_iter<I>(iter: I) -> I::Iter
+where
+    I: IntoParallelIterator,
 {
-    // TODO: merge_pairs(&points[..(points.len() - 1)], &points[1..])
-    todo!()
+    iter.into_par_iter()
 }
 
 /*
@@ -795,87 +891,6 @@ pub const TAU_POWERS_LENGTH: usize = 1 << 21;
 /// where the largest i = m - 2, requiring the computation of tau^(2m - 2)
 /// and thus giving us a vector length of 2^22 - 1.
 pub const TAU_POWERS_G1_LENGTH: usize = (TAU_POWERS_LENGTH << 1) - 1;
-
-/*
-fn write_point<W, G>(writer: &mut W, p: &G, compression: UseCompression) -> io::Result<()>
-where
-    W: Write,
-    G: CurveAffine,
-{
-    match compression {
-        UseCompression::Yes => writer.write_all(p.into_compressed().as_ref()),
-        UseCompression::No => writer.write_all(p.into_uncompressed().as_ref()),
-    }
-}
-*/
-
-/*
-impl Serialize for PublicKey<ArkPairing<Bls12_381>> {
-    #[inline]
-    fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        writer.write_all(&group_uncompressed(&self.tau_g1_ratio.0))?;
-        writer.write_all(&group_uncompressed(&self.tau_g1_ratio.1))?;
-        writer.write_all(&group_uncompressed(&self.alpha_g1_ratio.0))?;
-        writer.write_all(&group_uncompressed(&self.alpha_g1_ratio.1))?;
-        writer.write_all(&group_uncompressed(&self.beta_g1_ratio.0))?;
-        writer.write_all(&group_uncompressed(&self.beta_g1_ratio.1))?;
-        writer.write_all(&group_uncompressed(&self.tau_g2))?;
-        writer.write_all(&group_uncompressed(&self.alpha_g2))?;
-        writer.write_all(&group_uncompressed(&self.beta_g2))?;
-        Ok(())
-    }
-}
-
-impl Deserialize for PublicKey<ArkPairing<Bls12_381>> {
-    type Error = io::Error;
-
-    #[inline]
-    fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
-    where
-        R: Read,
-    {
-        /*
-        fn read_uncompressed<C: CurveAffine, R: Read>(reader: &mut R) -> Result<C, DeserializationError> {
-            let mut repr = C::Uncompressed::empty();
-            reader.read_exact(repr.as_mut())?;
-            let v = repr.into_affine()?;
-
-            if v.is_zero() {
-                Err(DeserializationError::PointAtInfinity)
-            } else {
-                Ok(v)
-            }
-        }
-
-        let tau_g1_s = read_uncompressed(reader)?;
-        let tau_g1_s_tau = read_uncompressed(reader)?;
-
-        let alpha_g1_s = read_uncompressed(reader)?;
-        let alpha_g1_s_alpha = read_uncompressed(reader)?;
-
-        let beta_g1_s = read_uncompressed(reader)?;
-        let beta_g1_s_beta = read_uncompressed(reader)?;
-
-        let tau_g2 = read_uncompressed(reader)?;
-        let alpha_g2 = read_uncompressed(reader)?;
-        let beta_g2 = read_uncompressed(reader)?;
-
-        Ok(PublicKey {
-            tau_g1: (tau_g1_s, tau_g1_s_tau),
-            alpha_g1: (alpha_g1_s, alpha_g1_s_alpha),
-            beta_g1: (beta_g1_s, beta_g1_s_beta),
-            tau_g2: tau_g2,
-            alpha_g2: alpha_g2,
-            beta_g2: beta_g2
-        })
-        */
-        todo!()
-    }
-}
-*/
 
 ///
 #[inline]
@@ -932,55 +947,6 @@ where
 }
 
 /*
-impl Serialize for Accumulator<Bls12_381> {
-    #[inline]
-    fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        todo!()
-    }
-}
-
-impl SerializeCompressed for Accumulator<Bls12_381> {
-    #[inline]
-    fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        /*
-        pub fn serialize<W: Write>(
-            &self,
-            writer: &mut W,
-            compression: UseCompression
-        ) -> io::Result<()>
-        {
-            fn write_all<W: Write, C: CurveAffine>(
-                writer: &mut W,
-                c: &[C],
-                compression: UseCompression
-            ) -> io::Result<()>
-            {
-                for c in c {
-                    write_point(writer, c, compression)?;
-                }
-
-                Ok(())
-            }
-
-            write_all(writer, &self.tau_powers_g1, compression)?;
-            write_all(writer, &self.tau_powers_g2, compression)?;
-            write_all(writer, &self.alpha_tau_powers_g1, compression)?;
-            write_all(writer, &self.beta_tau_powers_g1, compression)?;
-            write_all(writer, &[self.beta_g2], compression)?;
-
-            Ok(())
-        }
-            */
-        todo!()
-    }
-}
-
 impl Deserialize for Accumulator<Bls12_381> {
     type Error = io::Error;
 
@@ -1074,30 +1040,10 @@ impl Deserialize for Accumulator<Bls12_381> {
     }
 }
 */
+*/
 
 ///
 pub const ROUNDS: usize = 89;
-
-/*
-///
-#[inline]
-pub fn verify_accumulators<R>(reader: &mut R) -> Result<Accumulator<Bls12_381>, Error>
-where
-    R: Read,
-{
-    Accumulator::<Bls12_381>::verify_all(
-        iter::from_fn(|| {
-            Some(
-                Accumulator::deserialize(reader)
-                    .and_then(|a| PublicKey::deserialize(reader).map(|p| (a, p))),
-            )
-        })
-        .take(ROUNDS),
-    )
-}
-*/
-
-*/
 
 ///
 fn main() -> io::Result<()> {
