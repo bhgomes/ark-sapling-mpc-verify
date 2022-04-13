@@ -396,7 +396,7 @@ pub mod powersoftau {
     }
 
     ///
-    pub enum PublicKeyDeserializeError<G1, G2> {
+    pub enum PairingGroupsDeserializeError<G1, G2> {
         ///
         IsZero,
 
@@ -407,7 +407,7 @@ pub mod powersoftau {
         G2Error(G2),
     }
 
-    impl<G1, G2> PublicKeyDeserializeError<G1, G2> {
+    impl<G1, G2> PairingGroupsDeserializeError<G1, G2> {
         ///
         #[inline]
         fn map_g1(err: NonZeroDeserializeError<G1>) -> Self {
@@ -428,10 +428,46 @@ pub mod powersoftau {
     }
 
     ///
-    type PublicKeyDeserializeErrorType<C, M> = PublicKeyDeserializeError<
+    type DeserializeErrorType<C, M> = PairingGroupsDeserializeError<
         <<C as Configuration>::G1 as Serde<M>>::Error,
         <<C as Configuration>::G2 as Serde<M>>::Error,
     >;
+
+    ///
+    pub struct DeserializeError<C, M>(DeserializeErrorType<C, M>)
+    where
+        C: Configuration,
+        C::G1: Serde<M>,
+        C::G2: Serde<M>;
+
+    impl<C, M> DeserializeError<C, M>
+    where
+        C: Configuration,
+        C::G1: Serde<M>,
+        C::G2: Serde<M>,
+    {
+        ///
+        #[inline]
+        fn read_g1<R>(reader: &mut R) -> Result<NonZero<C::G1>, Self>
+        where
+            R: Read,
+        {
+            NonZero::deserialize(reader)
+                .map_err(DeserializeErrorType::<C, M>::map_g1)
+                .map_err(Self)
+        }
+
+        ///
+        #[inline]
+        fn read_g2<R>(reader: &mut R) -> Result<NonZero<C::G2>, Self>
+        where
+            R: Read,
+        {
+            NonZero::deserialize(reader)
+                .map_err(DeserializeErrorType::<C, M>::map_g2)
+                .map_err(Self)
+        }
+    }
 
     /// Contribution Public Key
     pub struct PublicKey<C>
@@ -457,44 +493,13 @@ pub mod powersoftau {
         beta_g2: NonZero<C::G2>,
     }
 
-    impl<C> PublicKey<C>
-    where
-        C: Configuration,
-    {
-        ///
-        #[inline]
-        fn read_g1<M, R>(
-            reader: &mut R,
-        ) -> Result<NonZero<C::G1>, PublicKeyDeserializeErrorType<C, M>>
-        where
-            C::G1: Serde<M>,
-            C::G2: Serde<M>,
-            R: Read,
-        {
-            NonZero::deserialize(reader).map_err(PublicKeyDeserializeError::map_g1)
-        }
-
-        ///
-        #[inline]
-        fn read_g2<M, R>(
-            reader: &mut R,
-        ) -> Result<NonZero<C::G2>, PublicKeyDeserializeErrorType<C, M>>
-        where
-            C::G1: Serde<M>,
-            C::G2: Serde<M>,
-            R: Read,
-        {
-            NonZero::deserialize(reader).map_err(PublicKeyDeserializeError::map_g2)
-        }
-    }
-
     impl<C, M> Serde<M> for PublicKey<C>
     where
         C: Configuration,
         C::G1: Serde<M>,
         C::G2: Serde<M>,
     {
-        type Error = PublicKeyDeserializeErrorType<C, M>;
+        type Error = DeserializeError<C, M>;
 
         #[inline]
         fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
@@ -519,12 +524,12 @@ pub mod powersoftau {
             R: Read,
         {
             Ok(Self {
-                tau_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
-                alpha_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
-                beta_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
-                tau_g2: Self::read_g2(reader)?,
-                alpha_g2: Self::read_g2(reader)?,
-                beta_g2: Self::read_g2(reader)?,
+                tau_g1_ratio: (Self::Error::read_g1(reader)?, Self::Error::read_g1(reader)?),
+                alpha_g1_ratio: (Self::Error::read_g1(reader)?, Self::Error::read_g1(reader)?),
+                beta_g1_ratio: (Self::Error::read_g1(reader)?, Self::Error::read_g1(reader)?),
+                tau_g2: Self::Error::read_g2(reader)?,
+                alpha_g2: Self::Error::read_g2(reader)?,
+                beta_g2: Self::Error::read_g2(reader)?,
             })
         }
     }
@@ -572,7 +577,7 @@ pub mod powersoftau {
         C::G1: Serde<M>,
         C::G2: Serde<M>,
     {
-        type Error = ();
+        type Error = DeserializeError<C, M>;
 
         #[inline]
         fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
@@ -600,7 +605,29 @@ pub mod powersoftau {
         where
             R: Read,
         {
-            todo!()
+            let mut tau_powers_g1 = Vec::with_capacity(C::G1_POWERS);
+            for _ in 0..C::G1_POWERS {
+                tau_powers_g1.push(Self::Error::read_g1(reader)?.into_inner());
+            }
+            let mut tau_powers_g2 = Vec::with_capacity(C::G2_POWERS);
+            for _ in 0..C::G2_POWERS {
+                tau_powers_g2.push(Self::Error::read_g2(reader)?.into_inner());
+            }
+            let mut alpha_tau_powers_g1 = Vec::with_capacity(C::G2_POWERS);
+            for _ in 0..C::G2_POWERS {
+                alpha_tau_powers_g1.push(Self::Error::read_g1(reader)?.into_inner());
+            }
+            let mut beta_tau_powers_g1 = Vec::with_capacity(C::G2_POWERS);
+            for _ in 0..C::G2_POWERS {
+                beta_tau_powers_g1.push(Self::Error::read_g1(reader)?.into_inner());
+            }
+            Ok(Self {
+                tau_powers_g1,
+                tau_powers_g2,
+                alpha_tau_powers_g1,
+                beta_tau_powers_g1,
+                beta_g2: Self::Error::read_g2(reader)?.into_inner(),
+            })
         }
     }
 
@@ -796,7 +823,7 @@ pub trait Serde<M = ()>: Sized {
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Compressed;
 
-///
+/// Non-Zero Type Wrapper
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NonZero<T>(T)
 where
@@ -806,7 +833,7 @@ impl<T> NonZero<T>
 where
     T: Zero,
 {
-    ///
+    /// Builds a new [`NonZero`] for `t` returning `None` if [`Zero::is_zero`] returns `true` on `t`.
     #[inline]
     pub fn new(t: T) -> Option<Self> {
         if t.is_zero() {
@@ -816,13 +843,13 @@ where
         }
     }
 
-    ///
+    /// Borrows the underlying non-zero value.
     #[inline]
     pub fn get(&self) -> &T {
         &self.0
     }
 
-    ///
+    /// Returns the non-zero value unwrapping it back into the base type.
     #[inline]
     pub fn into_inner(self) -> T {
         self.0
@@ -837,7 +864,7 @@ where
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.get()
     }
 }
 
@@ -962,87 +989,6 @@ impl Deserialize for Accumulator<Bls12_381> {
     where
         R: Read,
     {
-        /*
-        pub fn deserialize<R: Read>(
-            reader: &mut R,
-            compression: UseCompression,
-            checked: CheckForCorrectness
-        ) -> Result<Self, DeserializationError>
-        {
-            fn read_all<R: Read, C: CurveAffine>(
-                reader: &mut R,
-                size: usize,
-                compression: UseCompression,
-                checked: CheckForCorrectness
-            ) -> Result<Vec<C>, DeserializationError>
-            {
-                fn decompress_all<R: Read, E: EncodedPoint>(
-                    reader: &mut R,
-                    size: usize,
-                ) -> Result<Vec<E::Affine>, DeserializationError>
-                {
-                    // Read the encoded elements
-                    let mut res = vec![E::empty(); size];
-
-                    for encoded in &mut res {
-                        reader.read_exact(encoded.as_mut())?;
-                    }
-
-                    // Allocate space for the deserialized elements
-                    let mut res_affine = vec![E::Affine::zero(); size];
-
-                    let mut chunk_size = res.len() / num_cpus::get();
-                    if chunk_size == 0 {
-                        chunk_size = 1;
-                    }
-
-                    // If any of our threads encounter a deserialization/IO error, catch
-                    // it with this.
-                    let decoding_error = Arc::new(Mutex::new(None));
-
-                    crossbeam::scope(|scope| {
-                        for (source, target) in res.chunks(chunk_size).zip(res_affine.chunks_mut(chunk_size)) {
-                            let decoding_error = decoding_error.clone();
-
-                            scope.spawn(move || {
-                                for (source, target) in source.iter().zip(target.iter_mut()) {
-                                        // Points at infinity are never expected in the accumulator
-                                    let res = source.into_affine().map_err(|e| e.into()).and_then(|source| {
-                                            if source.is_zero() {
-                                                Err(DeserializationError::PointAtInfinity)
-                                            } else {
-                                                Ok(source)
-                                            }
-                                        });
-                                    match res {
-                                        Ok(source) => {
-                                            *target = source;
-                                        },
-                                        Err(e) => {
-                                            *decoding_error.lock().unwrap() = Some(e);
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    });
-
-                    match Arc::try_unwrap(decoding_error).unwrap().into_inner().unwrap() {
-                        Some(e) => {
-                            Err(e)
-                        },
-                        None => {
-                            Ok(res_affine)
-                        }
-                    }
-                }
-
-                match compression {
-                    UseCompression::Yes => decompress_all::<_, C::Compressed>(reader, size, checked),
-                    UseCompression::No => decompress_all::<_, C::Uncompressed>(reader, size, checked)
-                }
-            }
-            */
         todo!()
     }
 }
