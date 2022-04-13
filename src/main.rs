@@ -1,7 +1,6 @@
 //! Arkworks Trusted Setup
-//!
 
-use ark_ec::PairingEngine;
+use ark_ec::{AffineCurve, PairingEngine};
 use ark_ff::{UniformRand, Zero};
 use blake2::{Blake2b, Digest};
 use byteorder::{BigEndian, ReadBytesExt};
@@ -158,15 +157,21 @@ pub trait Pairing {
     /// Optimized Pre-computed Form of a [`G2`](Self::G2) Element
     type G2Prepared: From<Self::G2>;
 
+    /// Custom Pair
+    ///
+    /// Unfortunately, we need to do this trick to reduce the number of clones/copies because of
+    /// deficiencies in the arkworks pairing APIs.
+    type Pair: From<Pair<Self>> + Into<Pair<Self>>;
+
     /// Output of the Pairing
     type Output: PartialEq;
 
     /// Evaluates the pairing on `pair`.
-    fn eval(pair: &Pair<Self>) -> Self::Output;
+    fn eval(pair: &Self::Pair) -> Self::Output;
 
     /// Checks if `lhs` and `rhs` evaluate to the same point under the pairing function.
     #[inline]
-    fn has_same(lhs: &Pair<Self>, rhs: &Pair<Self>) -> bool {
+    fn has_same(lhs: &Self::Pair, rhs: &Self::Pair) -> bool {
         Self::eval(lhs) == Self::eval(rhs)
     }
 
@@ -180,9 +185,9 @@ pub trait Pairing {
         R1: Into<Self::G1Prepared>,
         R2: Into<Self::G2Prepared>,
     {
-        let lhs = (lhs.0.into(), lhs.1.into());
-        let rhs = (rhs.0.into(), rhs.1.into());
-        Self::has_same(&lhs, &rhs).then(|| (lhs, rhs))
+        let lhs = (lhs.0.into(), lhs.1.into()).into();
+        let rhs = (rhs.0.into(), rhs.1.into()).into();
+        Self::has_same(&lhs, &rhs).then(|| (lhs.into(), rhs.into()))
     }
 }
 
@@ -201,10 +206,11 @@ where
     type G2 = P::G2Affine;
     type G1Prepared = P::G1Prepared;
     type G2Prepared = P::G2Prepared;
+    type Pair = Pair<Self>;
     type Output = P::Fqk;
 
     #[inline]
-    fn eval(pair: &Pair<Self>) -> Self::Output {
+    fn eval(pair: &Self::Pair) -> Self::Output {
         P::product_of_pairings(iter::once(pair))
     }
 }
@@ -883,12 +889,12 @@ where
     }
 }
 
-///
+/// Deserialization Error for [`NonZero`]
 pub enum NonZeroDeserializeError<E> {
-    ///
+    /// Value returns `true` on [`Zero::is_zero`]
     IsZero,
 
-    ///
+    /// Plain Value Deserialization Error
     Error(E),
 }
 
@@ -907,70 +913,342 @@ where
     iter.into_par_iter()
 }
 
-/*
-/// The accumulator supports circuits with 2^21 multiplication gates.
-pub const TAU_POWERS_LENGTH: usize = 1 << 21;
+/// Sapling MPC
+pub mod sapling {
+    use super::*;
+    use ark_bls12_381::Bls12_381 as ArkBls12_381;
+    use core::ops::Add;
+    use powersoftau::{Configuration, Group};
+    use rand::Rng;
 
-/// More tau powers are needed in G1 because the Groth16 H query
-/// includes terms of the form tau^i * (tau^m - 1) = tau^(i+m) - tau^i
-/// where the largest i = m - 2, requiring the computation of tau^(2m - 2)
-/// and thus giving us a vector length of 2^22 - 1.
-pub const TAU_POWERS_G1_LENGTH: usize = (TAU_POWERS_LENGTH << 1) - 1;
-
-///
-#[inline]
-fn group_uncompressed<G>(point: &G) -> Vec<u8>
-where
-    G: AffineCurve,
-{
-    /* TODO: For BLS12-381
-    let mut res: [u8; 96] = [0; 96];
-    if point.is_zero() {
-        // Set the second-most significant bit to indicate this point is at infinity.
-        res.0[0] |= 1 << 6;
-    } else {
-        let mut writer = &mut res.0[..];
-        point.x.into_repr().write_be(&mut writer).unwrap();
-        point.y.into_repr().write_be(&mut writer).unwrap();
+    ///
+    #[inline]
+    fn write_group<G, X, Y, const N: usize>(point: &G, write_x: X, write_y: Y) -> [u8; N]
+    where
+        G: AffineCurve,
+        X: FnOnce(&G, &mut &mut [u8; N]),
+        Y: FnOnce(&G, &mut &mut [u8; N]),
+    {
+        let mut buffer = [0; N];
+        if point.is_zero() {
+            // Set the second-most significant bit to indicate this point is at infinity.
+            buffer[0] |= 1 << 6;
+        } else {
+            let mut writer = &mut buffer;
+            write_x(point, &mut writer);
+            write_y(point, &mut writer);
+        }
+        buffer
     }
-    res
-    */
-    todo!()
-}
 
-///
-#[inline]
-fn group_compressed<G>(point: &G) -> Vec<u8>
-where
-    G: AffineCurve,
-{
-    /* TODO: For BLS12-381
-    let mut res: [u8; 48] = [0; 48];
-    if point.is_zero() {
-        // Set the second-most significant bit to indicate this point is at infinity.
-        res.0[0] |= 1 << 6;
-    } else {
+    ///
+    #[inline]
+    fn write_group_compressed<G, X, Y, const N: usize>(
+        point: &G,
+        write_x: X,
+        compare_y: Y,
+    ) -> [u8; N]
+    where
+        G: AffineCurve,
+        X: FnOnce(&G, &mut &mut [u8; N]),
+        Y: FnOnce(&G) -> bool,
+    {
+        let mut buffer = [0; N];
+        if point.is_zero() {
+            // Set the second-most significant bit to indicate this point is at infinity.
+            buffer[0] |= 1 << 6;
+        } else {
+            write_x(point, &mut &mut buffer);
+
+            // Set the third most significant bit if the correct y-coordinate is lexicographically
+            // largest.
+            if compare_y(point) {
+                buffer[0] |= 1 << 5;
+            }
+        }
+        // Set highest bit to distinguish this as a compressed element.
+        buffer[0] |= 1 << 7;
+        buffer
+    }
+
+    ///
+    type G1Type = <ArkBls12_381 as PairingEngine>::G1Affine;
+
+    ///
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+    pub struct G1(G1Type);
+
+    impl Add for G1 {
+        type Output = Self;
+
+        #[inline]
+        fn add(mut self, rhs: Self) -> Self::Output {
+            self.add_assign(rhs);
+            self
+        }
+    }
+
+    impl AddAssign for G1 {
+        #[inline]
+        fn add_assign(&mut self, rhs: Self) {
+            self.0.add_assign(&rhs.0)
+        }
+    }
+
+    impl Group for G1 {
+        type Scalar = <G1Type as AffineCurve>::ScalarField;
+
+        #[inline]
+        fn mul(&self, scalar: &Self::Scalar) -> Self {
+            Self(self.0.mul(*scalar).into())
+        }
+    }
+
+    // TODO: 96 Bytes
+    impl Serde for G1 {
+        type Error = ();
+
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
+        where
+            W: Write,
         {
-            let mut writer = &mut res.0[..];
-            point.x.into_repr().write_be(&mut writer).unwrap();
+            todo!()
         }
 
-        let mut negy = point.y;
-        negy.negate();
-
-        // Set the third most significant bit if the correct y-coordinate is lexicographically
-        // largest.
-        if point.y > negy {
-            res.0[0] |= 1 << 5;
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
         }
     }
-    // Set highest bit to distinguish this as a compressed element.
-    res.0[0] |= 1 << 7;
-    res
-    */
-    todo!()
+
+    // TODO: 48 Bytes
+    impl Serde<Compressed> for G1 {
+        type Error = ();
+
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl UniformRand for G1 {
+        #[inline]
+        fn rand<R>(rng: &mut R) -> Self
+        where
+            R: Rng + ?Sized,
+        {
+            todo!()
+        }
+    }
+
+    impl Zero for G1 {
+        #[inline]
+        fn zero() -> Self {
+            Self(Zero::zero())
+        }
+
+        #[inline]
+        fn is_zero(&self) -> bool {
+            self.0.is_zero()
+        }
+    }
+
+    ///
+    type G2Type = <ArkBls12_381 as PairingEngine>::G2Affine;
+
+    ///
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+    pub struct G2(G2Type);
+
+    impl Add for G2 {
+        type Output = Self;
+
+        #[inline]
+        fn add(mut self, rhs: Self) -> Self::Output {
+            self.add_assign(rhs);
+            self
+        }
+    }
+
+    impl AddAssign for G2 {
+        #[inline]
+        fn add_assign(&mut self, rhs: Self) {
+            self.0.add_assign(&rhs.0)
+        }
+    }
+
+    impl Group for G2 {
+        type Scalar = <G2Type as AffineCurve>::ScalarField;
+
+        #[inline]
+        fn mul(&self, scalar: &Self::Scalar) -> Self {
+            Self(self.0.mul(*scalar).into())
+        }
+    }
+
+    // TODO: 192 Bytes
+    impl Serde for G2 {
+        type Error = ();
+
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    // TODO: 96 Bytes
+    impl Serde<Compressed> for G2 {
+        type Error = ();
+
+        #[inline]
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
+        where
+            W: Write,
+        {
+            todo!()
+        }
+
+        #[inline]
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: Read,
+        {
+            todo!()
+        }
+    }
+
+    impl UniformRand for G2 {
+        #[inline]
+        fn rand<R>(rng: &mut R) -> Self
+        where
+            R: Rng + ?Sized,
+        {
+            todo!()
+        }
+    }
+
+    impl Zero for G2 {
+        #[inline]
+        fn zero() -> Self {
+            Self(Zero::zero())
+        }
+
+        #[inline]
+        fn is_zero(&self) -> bool {
+            self.0.is_zero()
+        }
+    }
+
+    ///
+    type G1PreparedType = <ArkBls12_381 as PairingEngine>::G1Prepared;
+
+    ///
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct G1Prepared(G1PreparedType);
+
+    impl From<G1> for G1Prepared {
+        #[inline]
+        fn from(point: G1) -> Self {
+            Self(point.0.into())
+        }
+    }
+
+    ///
+    type G2PreparedType = <ArkBls12_381 as PairingEngine>::G2Prepared;
+
+    ///
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct G2Prepared(G2PreparedType);
+
+    impl From<G2> for G2Prepared {
+        #[inline]
+        fn from(point: G2) -> Self {
+            Self(point.0.into())
+        }
+    }
+
+    ///
+    pub struct Pair((G1PreparedType, G2PreparedType));
+
+    impl From<super::Pair<Bls12_381>> for Pair {
+        #[inline]
+        fn from(pair: super::Pair<Bls12_381>) -> Self {
+            Self(((pair.0).0, (pair.1).0))
+        }
+    }
+
+    impl From<Pair> for super::Pair<Bls12_381> {
+        #[inline]
+        fn from(pair: Pair) -> Self {
+            (G1Prepared(pair.0 .0), G2Prepared(pair.0 .1))
+        }
+    }
+
+    ///
+    pub struct Bls12_381;
+
+    impl Pairing for Bls12_381 {
+        type G1 = G1;
+        type G2 = G2;
+        type G1Prepared = G1Prepared;
+        type G2Prepared = G2Prepared;
+        type Pair = Pair;
+        type Output = <ArkBls12_381 as PairingEngine>::Fqk;
+
+        #[inline]
+        fn eval(pair: &Self::Pair) -> Self::Output {
+            ArkBls12_381::product_of_pairings(iter::once(&pair.0))
+        }
+    }
+
+    ///
+    pub struct Sapling;
+
+    impl Configuration for Sapling {
+        type G1 = G1;
+        type G2 = G2;
+        type Pairing = Bls12_381;
+
+        const G1_POWERS: usize = (Self::G2_POWERS << 1) - 1;
+        const G2_POWERS: usize = 1 << 21;
+
+        #[inline]
+        fn g1_prime_subgroup_generator() -> Self::G1 {
+            G1(G1Type::prime_subgroup_generator())
+        }
+
+        #[inline]
+        fn g2_prime_subgroup_generator() -> Self::G2 {
+            G2(G2Type::prime_subgroup_generator())
+        }
+    }
 }
-*/
 
 ///
 pub const ROUNDS: usize = 89;
