@@ -1,4 +1,5 @@
-//! Arkworks Sapling Powers of Tau
+//! Arkworks Trusted Setup
+//!
 
 use ark_ec::PairingEngine;
 use ark_ff::{UniformRand, Zero};
@@ -11,7 +12,7 @@ use core::{
     marker::PhantomData,
     ops::{AddAssign, Deref},
 };
-use rand::{rngs::OsRng, CryptoRng, RngCore, SeedableRng};
+use rand::{rngs::OsRng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::io::{self, Read, Write};
 
@@ -213,7 +214,7 @@ pub mod powersoftau {
     use super::*;
 
     /// Curve
-    pub trait Group: AddAssign + Clone + PartialEq + Send + Sync + Zero {
+    pub trait Group: AddAssign + Clone + PartialEq + Send + Sync + UniformRand + Zero {
         /// Scalar Field
         type Scalar: Send + UniformRand;
 
@@ -269,17 +270,7 @@ pub mod powersoftau {
                 .expect("This is always possible since we have enough bytes to begin with.");
             seed.extend(word.to_le_bytes());
         }
-        sample_group(&mut ChaCha20Rng::from_seed(into_array_unchecked(seed)))
-    }
-
-    ///
-    #[inline]
-    fn sample_group<G, R>(rng: &mut R) -> G
-    where
-        G: Group,
-        R: CryptoRng + RngCore + ?Sized,
-    {
-        todo!()
+        G::rand(&mut ChaCha20Rng::from_seed(into_array_unchecked(seed)))
     }
 
     /// Powers of Tau Configuration
@@ -979,20 +970,6 @@ where
     */
     todo!()
 }
-
-/*
-impl Deserialize for Accumulator<Bls12_381> {
-    type Error = io::Error;
-
-    #[inline]
-    fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
-    where
-        R: Read,
-    {
-        todo!()
-    }
-}
-*/
 */
 
 ///
