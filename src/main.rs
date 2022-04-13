@@ -9,7 +9,7 @@ use core::{
     hash::Hash,
     iter,
     marker::PhantomData,
-    ops::AddAssign,
+    ops::{AddAssign, Deref},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -213,18 +213,7 @@ pub mod powersoftau {
     use super::*;
 
     /// Curve
-    pub trait Group:
-        AddAssign
-        + Clone
-        + Deserialize
-        + DeserializeCompressed
-        + PartialEq
-        + Send
-        + Serialize
-        + SerializeCompressed
-        + Sync
-        + Zero
-    {
+    pub trait Group: AddAssign + Clone + PartialEq + Send + Sync + Zero {
         /// Scalar Field
         type Scalar: Send + UniformRand;
 
@@ -296,10 +285,10 @@ pub mod powersoftau {
     /// Powers of Tau Configuration
     pub trait Configuration {
         /// Left Group of the Pairing
-        type G1: Group;
+        type G1: Group + Serde + Serde<Compressed>;
 
         /// Right Group of the Pairing
-        type G2: Group;
+        type G2: Group + Serde + Serde<Compressed>;
 
         /// Pairing
         type Pairing: Pairing<G1 = Self::G1, G2 = Self::G2>;
@@ -316,6 +305,10 @@ pub mod powersoftau {
         /// Returns a chosen prime subgroup generator for G2.
         fn g2_prime_subgroup_generator() -> Self::G2;
     }
+
+    ///
+    const HASHER_WRITER_EXPECT_MESSAGE: &str =
+        "The `Blake2b` hasher's `Write` implementation never returns an error.";
 
     /// Verification Error
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -371,15 +364,19 @@ pub mod powersoftau {
     impl ResponseDigest {
         /// Hashes `self` and the G<sub>1</sub> `ratio` to produce a G<sub>2</sub> group element.
         #[inline]
-        pub fn hash_to_group<C>(self, personalization: u8, ratio: &(C::G1, C::G1)) -> C::G2
+        pub fn hash_to_group<C>(
+            self,
+            personalization: u8,
+            ratio: &(NonZero<C::G1>, NonZero<C::G1>),
+        ) -> C::G2
         where
             C: Configuration,
         {
             let mut hasher = Blake2b::default();
             hasher.update(&[personalization]);
             hasher.update(&self.0);
-            ratio.0.serialize(&mut hasher).expect("");
-            ratio.1.serialize(&mut hasher).expect("");
+            Serde::<()>::serialize(&ratio.0, &mut hasher).expect(HASHER_WRITER_EXPECT_MESSAGE);
+            Serde::<()>::serialize(&ratio.1, &mut hasher).expect(HASHER_WRITER_EXPECT_MESSAGE);
             hash_to_group(into_array_unchecked(hasher.finalize()))
         }
     }
@@ -410,14 +407,31 @@ pub mod powersoftau {
         G2Error(G2),
     }
 
-    ///
-    pub enum NonZeroDeserializeError<E> {
+    impl<G1, G2> PublicKeyDeserializeError<G1, G2> {
         ///
-        IsZero,
+        #[inline]
+        fn map_g1(err: NonZeroDeserializeError<G1>) -> Self {
+            match err {
+                NonZeroDeserializeError::IsZero => Self::IsZero,
+                NonZeroDeserializeError::Error(err) => Self::G1Error(err),
+            }
+        }
 
         ///
-        Error(E),
+        #[inline]
+        fn map_g2(err: NonZeroDeserializeError<G2>) -> Self {
+            match err {
+                NonZeroDeserializeError::IsZero => Self::IsZero,
+                NonZeroDeserializeError::Error(err) => Self::G2Error(err),
+            }
+        }
     }
+
+    ///
+    type PublicKeyDeserializeErrorType<C, M> = PublicKeyDeserializeError<
+        <<C as Configuration>::G1 as Serde<M>>::Error,
+        <<C as Configuration>::G2 as Serde<M>>::Error,
+    >;
 
     /// Contribution Public Key
     pub struct PublicKey<C>
@@ -425,86 +439,65 @@ pub mod powersoftau {
         C: Configuration,
     {
         ///
-        tau_g1_ratio: (C::G1, C::G1),
+        tau_g1_ratio: (NonZero<C::G1>, NonZero<C::G1>),
 
         ///
-        alpha_g1_ratio: (C::G1, C::G1),
+        alpha_g1_ratio: (NonZero<C::G1>, NonZero<C::G1>),
 
         ///
-        beta_g1_ratio: (C::G1, C::G1),
+        beta_g1_ratio: (NonZero<C::G1>, NonZero<C::G1>),
 
         ///
-        tau_g2: C::G2,
+        tau_g2: NonZero<C::G2>,
 
         ///
-        alpha_g2: C::G2,
+        alpha_g2: NonZero<C::G2>,
 
         ///
-        beta_g2: C::G2,
+        beta_g2: NonZero<C::G2>,
     }
 
-    impl<C> Deserialize for PublicKey<C>
+    impl<C> PublicKey<C>
     where
         C: Configuration,
     {
-        type Error =
-            PublicKeyDeserializeError<<C::G1 as Deserialize>::Error, <C::G1 as Deserialize>::Error>;
-
+        ///
         #[inline]
-        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+        fn read_g1<M, R>(
+            reader: &mut R,
+        ) -> Result<NonZero<C::G1>, PublicKeyDeserializeErrorType<C, M>>
         where
+            C::G1: Serde<M>,
+            C::G2: Serde<M>,
             R: Read,
         {
-            /*
-            #[inline]
-            fn read<G, R>(
-                reader: &mut R,
-            ) -> Result<G, NonZeroDeserializeError<<G as Deserialize>::Error>>
-            where
-                G: Group,
-                R: Read,
-            {
-                let group = G::deserialize(reader)?;
-                if group.is_zero() {
-                    Err(NonZeroDeserializeError::IsZero)
-                } else {
-                    Ok(group)
-                }
-            }
-            Ok(Self {
-                tau_g1_ratio: (read(reader)?, read(reader)?),
-                alpha_g1_ratio: (read(reader)?, read(reader)?),
-                beta_g1_ratio: (read(reader)?, read(reader)?),
-                tau_g2: read(reader)?,
-                alpha_g2: read(reader)?,
-                beta_g2: read(reader)?,
-            })
-            */
-            todo!()
+            NonZero::deserialize(reader).map_err(PublicKeyDeserializeError::map_g1)
+        }
+
+        ///
+        #[inline]
+        fn read_g2<M, R>(
+            reader: &mut R,
+        ) -> Result<NonZero<C::G2>, PublicKeyDeserializeErrorType<C, M>>
+        where
+            C::G1: Serde<M>,
+            C::G2: Serde<M>,
+            R: Read,
+        {
+            NonZero::deserialize(reader).map_err(PublicKeyDeserializeError::map_g2)
         }
     }
 
-    impl<C> DeserializeCompressed for PublicKey<C>
+    impl<C, M> Serde<M> for PublicKey<C>
     where
         C: Configuration,
+        C::G1: Serde<M>,
+        C::G2: Serde<M>,
     {
-        type Error = io::Error;
+        type Error = PublicKeyDeserializeErrorType<C, M>;
 
         #[inline]
-        fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
-        where
-            R: Read,
-        {
-            todo!()
-        }
-    }
-
-    impl<C> Serialize for PublicKey<C>
-    where
-        C: Configuration,
-    {
-        #[inline]
-        fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
         where
             W: Write,
         {
@@ -519,27 +512,20 @@ pub mod powersoftau {
             self.beta_g2.serialize(writer)?;
             Ok(())
         }
-    }
 
-    impl<C> SerializeCompressed for PublicKey<C>
-    where
-        C: Configuration,
-    {
         #[inline]
-        fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
         where
-            W: Write,
+            R: Read,
         {
-            self.tau_g1_ratio.0.serialize_compressed(writer)?;
-            self.tau_g1_ratio.1.serialize_compressed(writer)?;
-            self.alpha_g1_ratio.0.serialize_compressed(writer)?;
-            self.alpha_g1_ratio.1.serialize_compressed(writer)?;
-            self.beta_g1_ratio.0.serialize_compressed(writer)?;
-            self.beta_g1_ratio.1.serialize_compressed(writer)?;
-            self.tau_g2.serialize_compressed(writer)?;
-            self.alpha_g2.serialize_compressed(writer)?;
-            self.beta_g2.serialize_compressed(writer)?;
-            Ok(())
+            Ok(Self {
+                tau_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
+                alpha_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
+                beta_g1_ratio: (Self::read_g1(reader)?, Self::read_g1(reader)?),
+                tau_g2: Self::read_g2(reader)?,
+                alpha_g2: Self::read_g2(reader)?,
+                beta_g2: Self::read_g2(reader)?,
+            })
         }
     }
 
@@ -580,42 +566,16 @@ pub mod powersoftau {
         }
     }
 
-    impl<C> Deserialize for Accumulator<C>
+    impl<C, M> Serde<M> for Accumulator<C>
     where
         C: Configuration,
+        C::G1: Serde<M>,
+        C::G2: Serde<M>,
     {
-        type Error = io::Error;
+        type Error = ();
 
         #[inline]
-        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
-        where
-            R: Read,
-        {
-            todo!()
-        }
-    }
-
-    impl<C> DeserializeCompressed for Accumulator<C>
-    where
-        C: Configuration,
-    {
-        type Error = io::Error;
-
-        #[inline]
-        fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
-        where
-            R: Read,
-        {
-            todo!()
-        }
-    }
-
-    impl<C> Serialize for Accumulator<C>
-    where
-        C: Configuration,
-    {
-        #[inline]
-        fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
+        fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
         where
             W: Write,
         {
@@ -634,37 +594,15 @@ pub mod powersoftau {
             self.beta_g2.serialize(writer)?;
             Ok(())
         }
-    }
 
-    impl<C> SerializeCompressed for Accumulator<C>
-    where
-        C: Configuration,
-    {
         #[inline]
-        fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
+        fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
         where
-            W: Write,
+            R: Read,
         {
-            for elem in &self.tau_powers_g1 {
-                elem.serialize_compressed(writer)?;
-            }
-            for elem in &self.tau_powers_g2 {
-                elem.serialize_compressed(writer)?;
-            }
-            for elem in &self.alpha_tau_powers_g1 {
-                elem.serialize_compressed(writer)?;
-            }
-            for elem in &self.beta_tau_powers_g1 {
-                elem.serialize_compressed(writer)?;
-            }
-            self.beta_g2.serialize_compressed(writer)?;
-            Ok(())
+            todo!()
         }
     }
-
-    ///
-    const HASHER_WRITER_EXPECT_MESSAGE: &str =
-        "The `Blake2b` hasher's `Write` implementation never returns an error.";
 
     /// Powers of Tau Trusted Setup
     pub struct PowersOfTau<C>(PhantomData<C>)
@@ -685,8 +623,7 @@ pub mod powersoftau {
         fn challenge(last: &Self::Accumulator, last_response: &Self::Response) -> Self::Challenge {
             let mut hasher = Blake2b::default();
             hasher.update(last_response.0);
-            last.serialize(&mut hasher)
-                .expect(HASHER_WRITER_EXPECT_MESSAGE);
+            Serde::<()>::serialize(last, &mut hasher).expect(HASHER_WRITER_EXPECT_MESSAGE);
             ChallengeDigest(into_array_unchecked(hasher.finalize()))
         }
 
@@ -698,11 +635,8 @@ pub mod powersoftau {
         ) -> Self::Response {
             let mut hasher = Blake2b::default();
             hasher.update(challenge.0);
-            next.serialize_compressed(&mut hasher)
-                .expect(HASHER_WRITER_EXPECT_MESSAGE);
-            next_key
-                .serialize(&mut hasher)
-                .expect(HASHER_WRITER_EXPECT_MESSAGE);
+            Serde::<Compressed>::serialize(next, &mut hasher).expect(HASHER_WRITER_EXPECT_MESSAGE);
+            Serde::<()>::serialize(next_key, &mut hasher).expect(HASHER_WRITER_EXPECT_MESSAGE);
             ResponseDigest(into_array_unchecked(hasher.finalize()))
         }
 
@@ -718,18 +652,27 @@ pub mod powersoftau {
             let beta_g2_s = next_response.hash_to_group::<C>(2, &next_key.beta_g1_ratio);
 
             let ((_, key_tau_g2), (_, tau_g2_s)) = C::Pairing::same(
-                (next_key.tau_g1_ratio.0, next_key.tau_g2),
-                (next_key.tau_g1_ratio.1, tau_g2_s),
+                (
+                    next_key.tau_g1_ratio.0.into_inner(),
+                    next_key.tau_g2.into_inner(),
+                ),
+                (next_key.tau_g1_ratio.1.into_inner(), tau_g2_s),
             )
             .ok_or(VerificationError::TauKnowledgeProof)?;
             let ((_, key_alpha_g2), (_, alpha_g2_s)) = C::Pairing::same(
-                (next_key.alpha_g1_ratio.0, next_key.alpha_g2),
-                (next_key.alpha_g1_ratio.1, alpha_g2_s),
+                (
+                    next_key.alpha_g1_ratio.0.into_inner(),
+                    next_key.alpha_g2.into_inner(),
+                ),
+                (next_key.alpha_g1_ratio.1.into_inner(), alpha_g2_s),
             )
             .ok_or(VerificationError::AlphaKnowledgeProof)?;
             let ((_, key_beta_g2), (_, beta_g2_s)) = C::Pairing::same(
-                (next_key.beta_g1_ratio.0, next_key.beta_g2),
-                (next_key.beta_g1_ratio.1, beta_g2_s),
+                (
+                    next_key.beta_g1_ratio.0.into_inner(),
+                    next_key.beta_g2.into_inner(),
+                ),
+                (next_key.beta_g1_ratio.1.into_inner(), beta_g2_s),
             )
             .ok_or(VerificationError::BetaKnowledgeProof)?;
 
@@ -829,42 +772,106 @@ where
     }
 }
 
-/// Serialization Trait
-pub trait Serialize {
-    /// Serializes `self` into `writer`.
+/// Serialization and Deserialization Trait
+///
+/// This trait comes with a "mode" flag `M` which specifies an encoding convention.
+pub trait Serde<M = ()>: Sized {
+    /// Deserialization Error Type
+    type Error;
+
+    /// Serializes `self` into the `writer`.
     fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
     where
         W: Write;
-}
 
-/// Compressed Serialization Trait
-pub trait SerializeCompressed {
-    /// Serializes a compressed form of `self` into `writer`.
-    fn serialize_compressed<W>(&self, writer: &mut W) -> io::Result<()>
-    where
-        W: Write;
-}
-
-/// Deserialization Trait
-pub trait Deserialize: Sized {
-    ///
-    type Error;
-
-    ///
+    /// Deserializes a value of type `Self` from the `reader`.
     fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
         R: Read;
 }
 
-/// Compressed Deserialization Trait
-pub trait DeserializeCompressed: Sized {
+/// Compressed Serialization and Deserialization Mode
+///
+/// This mode is used by [`Serde`] to specify a canonical compressed encoding scheme.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Compressed;
+
+///
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NonZero<T>(T)
+where
+    T: Zero;
+
+impl<T> NonZero<T>
+where
+    T: Zero,
+{
     ///
-    type Error;
+    #[inline]
+    pub fn new(t: T) -> Option<Self> {
+        if t.is_zero() {
+            None
+        } else {
+            Some(Self(t))
+        }
+    }
 
     ///
-    fn deserialize_compressed<R>(reader: &mut R) -> Result<Self, Self::Error>
+    #[inline]
+    pub fn get(&self) -> &T {
+        &self.0
+    }
+
+    ///
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Deref for NonZero<T>
+where
+    T: Zero,
+{
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T, M> Serde<M> for NonZero<T>
+where
+    T: Serde<M> + Zero,
+{
+    type Error = NonZeroDeserializeError<T::Error>;
+
+    #[inline]
+    fn serialize<W>(&self, writer: &mut W) -> Result<(), io::Error>
     where
-        R: Read;
+        W: Write,
+    {
+        self.0.serialize(writer)
+    }
+
+    #[inline]
+    fn deserialize<R>(reader: &mut R) -> Result<Self, Self::Error>
+    where
+        R: Read,
+    {
+        Self::new(T::deserialize(reader).map_err(NonZeroDeserializeError::Error)?)
+            .ok_or(NonZeroDeserializeError::IsZero)
+    }
+}
+
+///
+pub enum NonZeroDeserializeError<E> {
+    ///
+    IsZero,
+
+    ///
+    Error(E),
 }
 
 ///
